@@ -30,6 +30,7 @@ import logging
 from typing import Optional
 
 import requests
+import google.generativeai as genai
 
 from data import DEPARTMENTS
 
@@ -42,6 +43,10 @@ if not BOT_TOKEN:
         "Не задано BOT_TOKEN. Встановіть змінну середовища BOT_TOKEN "
         "(токен отримаєте у @BotFather в Telegram) і запустіть знову."
     )
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+if GEMINI_API_KEY:
+    genai.configure(api_key=GEMINI_API_KEY)
+    gemini_model = genai.GenerativeModel("gemini-2.0-flash")
 
 API_URL = f"https://api.telegram.org/bot{BOT_TOKEN}"
 MAX_TG_MESSAGE = 4096  # ліміт Telegram на довжину одного повідомлення
@@ -164,6 +169,37 @@ def search_prompts(query: str, limit: int = 8):
     scored.sort(key=lambda x: -x[0])
     return [(dept_id, p) for _, dept_id, p in scored[:limit]]
 
+def smart_search_with_gemini(query: str):
+    """Просить Gemini підібрати номери найбільш підходящих промптів зі списку."""
+    if not GEMINI_API_KEY:
+        return None
+    catalog = []
+    for dept_id, dept in DEPARTMENTS.items():
+        for p in dept["prompts"]:
+            catalog.append(f"{dept_id}:{p['id']} — {p['title']}: {p['pain']}")
+    catalog_text = "\n".join(catalog)
+    prompt = (
+        f"Ось список промптів (формат dept:id — назва: біль):\n{catalog_text}\n\n"
+        f"Користувач написав: «{query}»\n"
+        f"Обери 1-3 НАЙБІЛЬШ підходящих промпти. Відповідай лише у форматі dept:id, "
+        f"через кому, без пояснень. Наприклад: sales:s1,support:sup3"
+    )
+    try:
+        response = gemini_model.generate_content(prompt)
+        ids = response.text.strip().split(",")
+        results = []
+        for item in ids:
+            item = item.strip()
+            if ":" in item:
+                d_id, p_id = item.split(":", 1)
+                p = find_prompt(d_id.strip(), p_id.strip())
+                if p:
+                    results.append((d_id.strip(), p))
+        return results
+    except Exception as e:
+        log.warning("Gemini error: %s", e)
+        return None
+
 
 # ---------- Форматування відповіді з промптом ----------
 
@@ -194,7 +230,9 @@ def handle_text(chat_id: int, text: str):
         handle_start(chat_id)
         return
 
-    results = search_prompts(text)
+    results = smart_search_with_gemini(text)
+        if not results:
+            results = search_prompts(text)
     if not results:
         send_message(
             chat_id,
