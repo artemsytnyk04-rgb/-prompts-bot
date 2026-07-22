@@ -338,11 +338,11 @@ def run():
                if "message" in update and "text" in update["message"]:
                 chat_id = update["message"]["chat"]["id"]
                 handle_text(chat_id, update["message"]["text"])
-            elif "message" in update and "voice" in update["message"]:
+               elif "message" in update and "voice" in update["message"]:
                 chat_id = update["message"]["chat"]["id"]
                 file_id = update["message"]["voice"]["file_id"]
                 handle_voice(chat_id, file_id)
-            elif "callback_query" in update:
+               elif "callback_query" in update:
                 handle_callback(update["callback_query"])
             except Exception as e:
                 log.exception("Помилка обробки апдейту: %s", e)
