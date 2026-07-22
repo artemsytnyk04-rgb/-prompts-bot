@@ -231,14 +231,13 @@ def handle_text(chat_id: int, text: str):
         return
 
     results = smart_search_with_gemini(text)
-        if not results:
-            results = search_prompts(text)
+    if not results:
+        results = search_prompts(text)
+
     if not results:
         send_message(
             chat_id,
-            "Нічого не знайшов за цим словом 🤔 Спробуйте інше ключове слово "
-            "(наприклад частину проблеми: «повернення», «вигорання», «домашка») "
-            "або оберіть відділ з меню: /start",
+            "Нічого не знайшов за цим словом 🤔 ...",
         )
         return
 
