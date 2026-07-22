@@ -289,7 +289,31 @@ def handle_callback(callback_query: dict):
         return
 
     answer_callback(cq_id)
+  
+def handle_voice(chat_id: int, file_id: str):
+    """Завантажує голосове повідомлення і розпізнає його через Gemini."""
+    if not GEMINI_API_KEY:
+        send_message(chat_id, "Голосовий пошук поки не налаштований, напишіть текстом.")
+        return
+    file_info = api("getFile", file_id=file_id)
+    file_path = file_info["result"]["file_path"]
+    file_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}"
+    audio_data = requests.get(file_url).content
 
+    audio_part = {"mime_type": "audio/ogg", "data": audio_data}
+    try:
+        response = gemini_model.generate_content([
+            "Транскрибуй це аудіо українською мовою. Дай лише текст, без коментарів.",
+            audio_part,
+        ])
+        transcribed_text = response.text.strip()
+    except Exception as e:
+        log.warning("Gemini voice error: %s", e)
+        send_message(chat_id, "Не вдалося розпізнати голос, спробуйте ще раз або напишіть текстом.")
+        return
+    send_message(chat_id, f"🎤 Розпізнав: «{transcribed_text}»")
+    handle_text(chat_id, transcribed_text)
+  
 
 # ---------- Головний цикл (long polling) ----------
 
@@ -311,11 +335,15 @@ def run():
         for update in resp.get("result", []):
             offset = update["update_id"] + 1
             try:
-                if "message" in update and "text" in update["message"]:
-                    chat_id = update["message"]["chat"]["id"]
-                    handle_text(chat_id, update["message"]["text"])
-                elif "callback_query" in update:
-                    handle_callback(update["callback_query"])
+               if "message" in update and "text" in update["message"]:
+                chat_id = update["message"]["chat"]["id"]
+                handle_text(chat_id, update["message"]["text"])
+            elif "message" in update and "voice" in update["message"]:
+                chat_id = update["message"]["chat"]["id"]
+                file_id = update["message"]["voice"]["file_id"]
+                handle_voice(chat_id, file_id)
+            elif "callback_query" in update:
+                handle_callback(update["callback_query"])
             except Exception as e:
                 log.exception("Помилка обробки апдейту: %s", e)
 
