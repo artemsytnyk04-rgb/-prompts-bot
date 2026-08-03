@@ -48,6 +48,16 @@ if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
     gemini_model = genai.GenerativeModel("gemini-3.6-flash")
 
+# Кеш відповідей Gemini (24 год) — щоб не платити двічі за той самий запит.
+_search_cache: dict = {}
+_CACHE_TTL = 24 * 3600
+
+# Ліміт викликів Gemini на одного користувача — щоб один чат не з'їв весь
+# денний безкоштовний ліміт бота.
+_gemini_calls: dict = {}
+_GEMINI_RATE_LIMIT = 5
+_GEMINI_RATE_WINDOW = 3600
+
 API_URL = f"https://api.telegram.org/bot{BOT_TOKEN}"
 MAX_TG_MESSAGE = 4096  # ліміт Telegram на довжину одного повідомлення
 
@@ -169,9 +179,49 @@ def search_prompts(query: str, limit: int = 8):
     scored.sort(key=lambda x: -x[0])
     return [(dept_id, p) for _, dept_id, p in scored[:limit]]
 
-def smart_search_with_gemini(query: str):
-    """Просить Gemini підібрати номери найбільш підходящих промптів зі списку."""
+def _cache_get(query: str):
+    key = query.strip().lower()
+    entry = _search_cache.get(key)
+    if not entry:
+        return None
+    ts, id_pairs = entry
+    if time.time() - ts > _CACHE_TTL:
+        del _search_cache[key]
+        return None
+    results = [(d, find_prompt(d, p)) for d, p in id_pairs]
+    return [(d, p) for d, p in results if p]
+
+
+def _cache_set(query: str, id_pairs: list):
+    _search_cache[query.strip().lower()] = (time.time(), id_pairs)
+
+
+def _gemini_rate_limited(chat_id: Optional[int]) -> bool:
+    if chat_id is None:
+        return False
+    now = time.time()
+    calls = _gemini_calls.setdefault(chat_id, [])
+    calls[:] = [t for t in calls if now - t < _GEMINI_RATE_WINDOW]
+    if len(calls) >= _GEMINI_RATE_LIMIT:
+        return True
+    calls.append(now)
+    return False
+
+
+def smart_search_with_gemini(query: str, chat_id: Optional[int] = None):
+    """Просить Gemini підібрати номери найбільш підходящих промптів зі списку.
+
+    Спершу перевіряє кеш (24 год) — щоб однакові запити від різних людей не
+    викликали Gemini повторно. Потім перевіряє ліміт викликів на чат — щоб
+    один активний користувач не вичерпав денну безкоштовну квоту бота.
+    """
     if not GEMINI_API_KEY:
+        return None
+    cached = _cache_get(query)
+    if cached is not None:
+        return cached
+    if _gemini_rate_limited(chat_id):
+        log.info("Gemini rate limit hit for chat_id=%s, skipping", chat_id)
         return None
     catalog = []
     for dept_id, dept in DEPARTMENTS.items():
@@ -188,6 +238,7 @@ def smart_search_with_gemini(query: str):
         response = gemini_model.generate_content(prompt)
         ids = response.text.strip().split(",")
         results = []
+        id_pairs = []
         for item in ids:
             item = item.strip()
             if ":" in item:
@@ -195,6 +246,8 @@ def smart_search_with_gemini(query: str):
                 p = find_prompt(d_id.strip(), p_id.strip())
                 if p:
                     results.append((d_id.strip(), p))
+                    id_pairs.append((d_id.strip(), p_id.strip()))
+        _cache_set(query, id_pairs)
         return results
     except Exception as e:
         log.warning("Gemini error: %s", e)
@@ -220,27 +273,48 @@ def handle_start(chat_id: int):
     text = (
         "👋 Привіт! Це бот-бібліотека готових ШІ-промптів для команди.\n\n"
         "Оберіть відділ кнопкою нижче — або просто напишіть словами вашу проблему "
-        "(наприклад «заперечення» або «негатив»), і я знайду потрібний промпт."
+        "(наприклад «заперечення» або «негатив»), і я знайду потрібний промпт.\n\n"
+        "Команда /help — приклади запитів і як користуватись голосом."
     )
     send_message(chat_id, text, reply_markup=departments_keyboard())
 
 
+def handle_help(chat_id: int):
+    text = (
+        "ℹ️ <b>Як користуватись ботом</b>\n\n"
+        "• <b>Кнопкою</b> — /start, оберіть відділ, потім промпт зі списку.\n"
+        "• <b>Текстом</b> — напишіть суть проблеми 1-2 словами, наприклад: "
+        "«заперечення», «вигорання», «розстрочка», «відгук», «найм», «розсилка».\n"
+        "• <b>Голосом</b> — наговоріть проблему, бот розпізнає мову і сам знайде промпт.\n\n"
+        "Команди: /start — меню відділів, /help — ця підказка."
+    )
+    send_message(chat_id, text)
+
+
 def handle_text(chat_id: int, text: str):
-    if text.strip().startswith("/start"):
+    stripped = text.strip()
+    if stripped.startswith("/start"):
         handle_start(chat_id)
+        return
+    if stripped.startswith("/help"):
+        handle_help(chat_id)
         return
 
     results = search_prompts(text)
+    used_gemini = False
     if not results:
-        results = smart_search_with_gemini(text)
+        results = smart_search_with_gemini(text, chat_id)
+        used_gemini = True
 
     if not results:
+        log.info("Запит без відповіді: %r (chat_id=%s, gemini_tried=%s)", text, chat_id, used_gemini)
         send_message(
             chat_id,
             "Нічого не знайшов за цим словом 🤔 ...",
         )
         return
 
+    log.info("Запит %r -> %d результат(ів) (gemini=%s, chat_id=%s)", text, len(results), used_gemini, chat_id)
     rows = [
         [{"text": f"{DEPARTMENTS[d]['label']} — {p['title']}", "callback_data": f"prompt:{d}:{p['id']}"}]
         for d, p in results
@@ -311,6 +385,7 @@ def handle_voice(chat_id: int, file_id: str):
         log.warning("Gemini voice error: %s", e)
         send_message(chat_id, "Не вдалося розпізнати голос, спробуйте ще раз або напишіть текстом.")
         return
+    log.info("Голосове розпізнано (chat_id=%s): %r", chat_id, transcribed_text)
     send_message(chat_id, f"🎤 Розпізнав: «{transcribed_text}»")
     handle_text(chat_id, transcribed_text)
   
