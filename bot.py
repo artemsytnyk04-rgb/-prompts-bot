@@ -392,8 +392,20 @@ def handle_voice(chat_id: int, file_id: str):
 
 # ---------- Головний цикл (long polling) ----------
 
+def register_commands():
+    """Реєструє /start і /help у меню Telegram (кнопка "/" біля поля вводу)."""
+    api(
+        "setMyCommands",
+        commands=[
+            {"command": "start", "description": "Меню відділів"},
+            {"command": "help", "description": "Приклади запитів і підказки"},
+        ],
+    )
+
+
 def run():
     log.info("Бот запущено, чекаю повідомлень...")
+    register_commands()
     offset = 0
     while True:
         try:
