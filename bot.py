@@ -46,7 +46,7 @@ if not BOT_TOKEN:
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
-    gemini_model = genai.GenerativeModel("gemini-2.0-flash")
+    gemini_model = genai.GenerativeModel("gemini-3.6-flash")
 
 API_URL = f"https://api.telegram.org/bot{BOT_TOKEN}"
 MAX_TG_MESSAGE = 4096  # ліміт Telegram на довжину одного повідомлення
@@ -230,9 +230,9 @@ def handle_text(chat_id: int, text: str):
         handle_start(chat_id)
         return
 
-    results = smart_search_with_gemini(text)
+    results = search_prompts(text)
     if not results:
-        results = search_prompts(text)
+        results = smart_search_with_gemini(text)
 
     if not results:
         send_message(
